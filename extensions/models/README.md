@@ -59,7 +59,8 @@ Collects one rolling 24-hour operational snapshot and one bounded diagnostic
 snapshot in a single model invocation. It accepts no method arguments, making
 it suitable for scheduled workflows without stale static timestamps. Both
 outputs use the same generated time and collection window and are persisted
-atomically as `daily-current`.
+atomically as `daily-current`. The model's configured global arguments are
+validated when Swamp injects them into the no-input workflow step.
 
 ```sh
 swamp model method run better-stack-read collectDailySnapshot

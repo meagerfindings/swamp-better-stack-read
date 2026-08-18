@@ -7,7 +7,7 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.4" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.5" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -69,7 +69,10 @@ export const collectArgumentsSchema = z.object({
     });
   }
 });
-const collectDailyArgumentsSchema = z.strictObject({});
+// Swamp supplies configured global arguments to no-input workflow steps during
+// method-argument validation. Accept exactly that known shape while the method
+// continues to derive its rolling window internally.
+const collectDailyArgumentsSchema = globalArgumentsSchema;
 
 const Monitor = z.strictObject({
   id: Identifier,

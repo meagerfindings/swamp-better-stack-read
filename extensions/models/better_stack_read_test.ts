@@ -448,10 +448,11 @@ Deno.test("model exposes read methods and no mutation authority", () => {
     "collectLogAggregateSnapshot",
     "collectDiagnosticSnapshot",
   ]);
-  assert(model.methods.collectDailySnapshot.arguments.safeParse({}).success);
+  assert(model.methods.collectDailySnapshot.arguments.safeParse(config).success);
   assert(
     !model.methods.collectDailySnapshot.arguments.safeParse({
-      windowStartedAt: generatedAt,
+      ...config,
+      unexpected: "value",
     }).success,
   );
   const dailySource = model.methods.collectDailySnapshot.execute.toString();
