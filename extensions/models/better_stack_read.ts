@@ -7,7 +7,7 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.6" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.7" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -796,7 +796,7 @@ export async function collectDiagnosticSnapshot(
         row.severity,
         errorClass,
         location,
-        normalizeDiagnosticFingerprintText(sanitized.value),
+        normalizeDiagnosticFingerprintText(sanitized.value).slice(0, 400),
       ]),
     );
     const prior = grouped.get(key);
