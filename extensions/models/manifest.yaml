@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@mgreten/better-stack-read"
-version: "2026.08.18.5"
+version: "2026.08.18.6"
 description: >
   Collects bounded, minimized operational metadata, severity aggregates, and redacted diagnostics from Better Stack without persisting raw logs.
 

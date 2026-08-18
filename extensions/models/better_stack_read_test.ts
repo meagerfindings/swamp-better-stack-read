@@ -333,7 +333,7 @@ Deno.test("diagnostic fingerprints ignore Resend job duration and identifiers", 
           dt: "2026-08-18T11:59:00Z",
           severity: "error",
           message:
-            "Error performing ActionMailer::MailDeliveryJob (Job ID: 550e8400-e29b-41d4-a716-446655440000) in 148.7ms: Resend::Error (Unable to deliver email)",
+            `Error performing ActionMailer::MailDeliveryJob (Job ID: 550e8400-e29b-41d4-a716-446655440000) in 148.7ms: Resend::Error (Unable to deliver email) ${"/shared/path ".repeat(50)}`,
           error_class: "Resend::Error",
           controller: "",
           action: "",
@@ -342,7 +342,7 @@ Deno.test("diagnostic fingerprints ignore Resend job duration and identifiers", 
           dt: "2026-08-18T11:54:00Z",
           severity: "error",
           message:
-            "Error performing ActionMailer::MailDeliveryJob (Job ID: 7d9b285d-67d7-4a25-8e91-31f490245381) in 932ms: Resend::Error (Unable to deliver email)",
+            `Error performing ActionMailer::MailDeliveryJob (Job ID: 7d9b285d-67d7-4a25-8e91-31f490245381) in 932ms: Resend::Error (Unable to deliver email) ${"/shared/path ".repeat(50)}`,
           error_class: "Resend::Error",
           controller: "",
           action: "",
@@ -363,6 +363,7 @@ Deno.test("diagnostic fingerprints ignore Resend job duration and identifiers", 
   equal(snapshot.groups[0].lastSeenAt, "2026-08-18T11:59:00Z");
   assert(snapshot.groups[0].summary.includes("148.7ms"));
   assert(snapshot.groups[0].summary.includes("<uuid>"));
+  assert(snapshot.groups[0].summary.length <= 500);
 });
 
 Deno.test("rolling daily collection derives an exact bounded UTC window", () => {

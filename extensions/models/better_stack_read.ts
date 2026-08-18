@@ -7,7 +7,7 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.5" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.6" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -786,7 +786,7 @@ export async function collectDiagnosticSnapshot(
     promptInjectionDetected: boolean;
   }>();
   for (const row of rows) {
-    const sanitized = sanitizeEvidenceText(row.message);
+    const sanitized = sanitizeEvidenceText(row.message, 2_000);
     const errorClass = component(row.error_class);
     const location =
       [component(row.controller), component(row.action)].filter(Boolean)
@@ -814,7 +814,7 @@ export async function collectDiagnosticSnapshot(
         severity: row.severity,
         errorClass,
         component: location,
-        summary: sanitized.value,
+        summary: sanitized.value.slice(0, 500),
         firstSeenAt: row.dt,
         lastSeenAt: row.dt,
         occurrences: 1,
