@@ -7,7 +7,7 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.1" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.2" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -510,25 +510,7 @@ export async function collectLogAggregateSnapshot(
 }
 
 /** Read-only Better Stack model definition exposed to swamp. */
-export const model: {
-  type: "@mgreten/better-stack-read";
-  version: typeof BETTER_STACK_READ_MODEL_VERSION;
-  globalArguments: typeof globalArgumentsSchema;
-  resources: Record<string, {
-    description: string;
-    schema: z.ZodType;
-    lifetime: "30d";
-    garbageCollection: number;
-  }>;
-  methods: Record<string, {
-    description: string;
-    arguments: typeof collectArgumentsSchema;
-    execute: (
-      args: CollectArguments,
-      context: WriteContext,
-    ) => Promise<{ dataHandles: unknown[] }>;
-  }>;
-} = {
+export const model = {
   type: "@mgreten/better-stack-read",
   version: BETTER_STACK_READ_MODEL_VERSION,
   globalArguments: globalArgumentsSchema,
