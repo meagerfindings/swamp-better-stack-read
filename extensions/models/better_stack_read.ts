@@ -7,18 +7,23 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.2" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.3" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
 const MAX_PAGES = 5;
 const MAX_WINDOW_SECONDS = 86_400;
 const MAX_AGGREGATE_ROWS = 20;
+const MAX_DIAGNOSTIC_ROWS = 200;
+const MAX_DIAGNOSTIC_GROUPS = 25;
 const Identifier = z.string().min(1).max(200);
 const Timestamp = z.iso.datetime({ offset: true });
 const NullableTimestamp = Timestamp.nullable();
 const Count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const SafeToken = z.string().min(1).max(50).regex(/^[a-z0-9_.-]+$/);
+const SafeText = z.string().min(1).max(500);
+const NullableComponent = z.string().max(120).regex(/^[A-Za-z0-9_:#/.-]+$/)
+  .nullable();
 
 const sqlEndpointSchema = z.url().refine((value) => {
   const url = new URL(value);
@@ -67,17 +72,21 @@ export const collectArgumentsSchema = z.object({
 
 const Monitor = z.strictObject({
   id: Identifier,
+  name: z.string().min(1).max(200),
   status: SafeToken,
   lastCheckedAt: NullableTimestamp,
   paused: z.boolean(),
 });
 const Heartbeat = z.strictObject({
   id: Identifier,
+  name: z.string().min(1).max(200),
   status: SafeToken,
   paused: z.boolean(),
 });
 const Incident = z.strictObject({
   id: Identifier,
+  name: z.string().min(1).max(200),
+  cause: z.string().min(1).max(300),
   status: SafeToken,
   startedAt: NullableTimestamp,
   acknowledgedAt: NullableTimestamp,
@@ -108,8 +117,10 @@ export const operationalSnapshotSchema = z.strictObject({
   incidents: BoundedCollection(Incident, 500),
   telemetrySources: BoundedCollection(InventoryItem, 250),
   errorApplications: BoundedCollection(InventoryItem, 300),
+  contentTrust: z.literal("untrusted-evidence"),
   minimization: z.strictObject({
     arbitraryTextRetained: z.literal(false),
+    sanitizedTextRetained: z.literal(true),
     urlsRetained: z.literal(false),
     requestContentRetained: z.literal(false),
     credentialsRetained: z.literal(false),
@@ -140,12 +151,54 @@ export const logAggregateSnapshotSchema = z.strictObject({
   }),
 });
 
+/** Persisted, grouped diagnostic evidence after deterministic redaction. */
+export const diagnosticSnapshotSchema = z.strictObject({
+  schemaVersion: z.literal("1.0"),
+  generatedAt: Timestamp,
+  windowStartedAt: Timestamp,
+  windowEndedAt: Timestamp,
+  groups: z.array(z.strictObject({
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    severity: SafeToken,
+    errorClass: NullableComponent,
+    component: NullableComponent,
+    summary: SafeText,
+    firstSeenAt: Timestamp,
+    lastSeenAt: Timestamp,
+    occurrences: Count.max(MAX_DIAGNOSTIC_ROWS),
+    redactionCount: Count,
+    promptInjectionDetected: z.boolean(),
+  })).max(MAX_DIAGNOSTIC_GROUPS),
+  returnedRows: Count.max(MAX_DIAGNOSTIC_ROWS),
+  returnedBytes: Count.max(MAX_RESPONSE_BYTES),
+  queryFingerprint: z.literal("bounded-error-diagnostics-v1"),
+  truncated: z.boolean(),
+  contentTrust: z.literal("untrusted-evidence"),
+  minimization: z.strictObject({
+    rawLogRecordsPersisted: z.literal(false),
+    requestContentPersisted: z.literal(false),
+    urlsPersisted: z.literal(false),
+    credentialsPersisted: z.literal(false),
+    longIdentifiersPersisted: z.literal(false),
+    deterministicRedactionApplied: z.literal(true),
+  }),
+  authority: z.strictObject({
+    mode: z.literal("read-only"),
+    sideEffects: z.literal("none"),
+    rawTelemetryRead: z.literal(true),
+    rawTelemetryPersisted: z.literal(false),
+    remediation: z.literal("prohibited"),
+  }),
+});
+
 type GlobalArguments = z.infer<typeof globalArgumentsSchema>;
 type CollectArguments = z.infer<typeof collectArgumentsSchema>;
 /** Output produced by {@link collectOperationalSnapshot}. */
 export type OperationalSnapshot = z.infer<typeof operationalSnapshotSchema>;
 /** Output produced by {@link collectLogAggregateSnapshot}. */
 export type LogAggregateSnapshot = z.infer<typeof logAggregateSnapshotSchema>;
+/** Output produced by {@link collectDiagnosticSnapshot}. */
+export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 type Fetcher = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -177,6 +230,77 @@ function nullableTimestamp(value: unknown): string | null {
   return typeof value === "string" && Timestamp.safeParse(value).success
     ? value
     : null;
+}
+
+type SanitizedText = {
+  value: string;
+  redactionCount: number;
+  promptInjectionDetected: boolean;
+};
+
+/** Deterministically removes common credentials, identifiers, and prompt-like instructions. */
+export function sanitizeEvidenceText(
+  value: unknown,
+  maximum = 500,
+): SanitizedText {
+  let text = typeof value === "string" ? value : "";
+  let redactionCount = 0;
+  let promptInjectionDetected = false;
+  const replace = (pattern: RegExp, replacement: string) => {
+    text = text.replace(pattern, () => {
+      redactionCount += 1;
+      return replacement;
+    });
+  };
+  const promptPattern =
+    /\b(?:ignore|disregard|override|forget)\b.{0,40}\b(?:instruction|prompt|policy|system)\b/gi;
+  if (promptPattern.test(text)) {
+    promptInjectionDetected = true;
+    promptPattern.lastIndex = 0;
+    replace(promptPattern, "<untrusted-instruction>");
+  }
+  replace(/\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "<credential>");
+  replace(
+    /\b(?:api[-_ ]?key|authorization|password|secret|token)\s*[:=]\s*[^\s,;]+/gi,
+    "<credential>",
+  );
+  replace(
+    /\b(?:parameters?|params|request[_ -]?body)\s*[:=]\s*.+$/gi,
+    "<request-content>",
+  );
+  replace(/https?:\/\/[^\s)\]}>]+/gi, "<url>");
+  replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "<email>");
+  replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "<ip>");
+  replace(
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi,
+    "<uuid>",
+  );
+  replace(/\+?\d[\d ().-]{8,}\d/g, "<phone>");
+  replace(/\b[A-Za-z0-9_-]{32,}\b/g, "<long-identifier>");
+  replace(/\b\d{7,}\b/g, "<numeric-identifier>");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) text = "No diagnostic message provided";
+  return {
+    value: text.slice(0, Math.max(1, maximum)),
+    redactionCount,
+    promptInjectionDetected,
+  };
+}
+
+function component(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return /^[A-Za-z0-9_:#/.-]{1,120}$/.test(normalized) ? normalized : null;
+}
+
+async function fingerprint(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)].map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 async function boundedBody(response: Response): Promise<string> {
@@ -364,6 +488,10 @@ export async function collectOperationalSnapshot(
     monitors: {
       items: monitors.items.map((item) => ({
         id: item.id,
+        name: sanitizeEvidenceText(
+          item.attributes?.pronounceable_name,
+          200,
+        ).value,
         status: token(item.attributes?.status),
         lastCheckedAt: nullableTimestamp(item.attributes?.last_checked_at),
         paused: item.attributes?.paused_at !== null &&
@@ -374,6 +502,7 @@ export async function collectOperationalSnapshot(
     heartbeats: {
       items: heartbeats.items.map((item) => ({
         id: item.id,
+        name: sanitizeEvidenceText(item.attributes?.name, 200).value,
         status: token(item.attributes?.status),
         paused: item.attributes?.paused_at !== null &&
           item.attributes?.paused_at !== undefined,
@@ -385,6 +514,8 @@ export async function collectOperationalSnapshot(
         const related = relationship(item.relationships);
         return {
           id: item.id,
+          name: sanitizeEvidenceText(item.attributes?.name, 200).value,
+          cause: sanitizeEvidenceText(item.attributes?.cause, 300).value,
           status: token(item.attributes?.status),
           startedAt: nullableTimestamp(item.attributes?.started_at),
           acknowledgedAt: nullableTimestamp(item.attributes?.acknowledged_at),
@@ -413,8 +544,10 @@ export async function collectOperationalSnapshot(
       })),
       truncated: applications.truncated,
     },
+    contentTrust: "untrusted-evidence",
     minimization: {
       arbitraryTextRetained: false,
+      sanitizedTextRetained: true,
       urlsRetained: false,
       requestContentRetained: false,
       credentialsRetained: false,
@@ -509,6 +642,173 @@ export async function collectLogAggregateSnapshot(
   });
 }
 
+function diagnosticSqlQuery(
+  config: GlobalArguments,
+  args: CollectArguments,
+): string {
+  const historicalTable = config.logsTable.replace(/_logs$/, "_s3");
+  const severity =
+    `lowerUTF8(coalesce(nullIf(JSONExtractString(raw, 'level'), ''), nullIf(JSONExtractString(raw, 'severity'), ''), 'unknown'))`;
+  return `SELECT
+  formatDateTime(dt, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS dt,
+  severity,
+  message,
+  error_class,
+  controller,
+  action
+FROM (
+  SELECT
+    dt,
+    ${severity} AS severity,
+    coalesce(nullIf(JSONExtractString(raw, 'message'), ''), nullIf(JSONExtractString(raw, 'msg'), ''), nullIf(JSONExtractString(raw, 'error'), ''), 'No diagnostic message provided') AS message,
+    coalesce(nullIf(JSONExtractString(raw, 'exception_class'), ''), nullIf(JSONExtractString(raw, 'error_class'), ''), '') AS error_class,
+    coalesce(nullIf(JSONExtractString(raw, 'controller'), ''), '') AS controller,
+    coalesce(nullIf(JSONExtractString(raw, 'action'), ''), '') AS action
+  FROM (
+    SELECT dt, raw FROM remote(${config.logsTable})
+    WHERE dt >= parseDateTime64BestEffort('${args.windowStartedAt}') AND dt < parseDateTime64BestEffort('${args.windowEndedAt}')
+    UNION ALL
+    SELECT dt, raw FROM s3Cluster(primary, ${historicalTable})
+    WHERE _row_type = 1 AND dt >= parseDateTime64BestEffort('${args.windowStartedAt}') AND dt < parseDateTime64BestEffort('${args.windowEndedAt}')
+  )
+)
+WHERE severity IN ('error', 'fatal', 'critical', 'alert', 'emergency')
+ORDER BY dt DESC
+LIMIT ${MAX_DIAGNOSTIC_ROWS}
+FORMAT JSONEachRow`;
+}
+
+/** Reads only selected error fields, redacts them, and persists grouped evidence. */
+export async function collectDiagnosticSnapshot(
+  config: GlobalArguments,
+  args: CollectArguments,
+  fetcher: Fetcher,
+  generatedAt = new Date().toISOString(),
+): Promise<DiagnosticSnapshot> {
+  const parsedConfig = globalArgumentsSchema.parse(config);
+  const parsedArgs = collectArgumentsSchema.parse(args);
+  if (
+    Date.parse(parsedArgs.windowEndedAt) > Date.parse(generatedAt) + 300_000
+  ) {
+    throw new Error(
+      "windowEndedAt cannot be more than five minutes in the future",
+    );
+  }
+  const url = new URL(parsedConfig.sqlEndpoint);
+  url.searchParams.set("output_format_pretty_row_numbers", "0");
+  url.searchParams.set("max_result_rows", String(MAX_DIAGNOSTIC_ROWS));
+  url.searchParams.set("max_result_bytes", String(MAX_RESPONSE_BYTES));
+  const response = await fetcher(url, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${
+        btoa(`${parsedConfig.sqlUsername}:${parsedConfig.sqlPassword}`)
+      }`,
+      "content-type": "text/plain",
+    },
+    body: diagnosticSqlQuery(parsedConfig, parsedArgs),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Better Stack diagnostic read failed with HTTP ${response.status}`,
+    );
+  }
+  const body = await boundedBody(response);
+  const rows = body.trim() === ""
+    ? []
+    : body.trim().split("\n").map((line) =>
+      z.strictObject({
+        dt: Timestamp,
+        severity: SafeToken,
+        message: z.string().max(100_000),
+        error_class: z.string().max(1_000),
+        controller: z.string().max(1_000),
+        action: z.string().max(1_000),
+      }).parse(JSON.parse(line))
+    );
+  if (rows.length > MAX_DIAGNOSTIC_ROWS) {
+    throw new Error("Better Stack diagnostic result exceeded the row limit");
+  }
+  const grouped = new Map<string, {
+    fingerprint: string;
+    severity: string;
+    errorClass: string | null;
+    component: string | null;
+    summary: string;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    occurrences: number;
+    redactionCount: number;
+    promptInjectionDetected: boolean;
+  }>();
+  for (const row of rows) {
+    const sanitized = sanitizeEvidenceText(row.message);
+    const errorClass = component(row.error_class);
+    const location =
+      [component(row.controller), component(row.action)].filter(Boolean)
+        .join("#") || null;
+    const key = await fingerprint(
+      JSON.stringify([row.severity, errorClass, location, sanitized.value]),
+    );
+    const prior = grouped.get(key);
+    if (prior) {
+      prior.firstSeenAt = prior.firstSeenAt < row.dt
+        ? prior.firstSeenAt
+        : row.dt;
+      prior.lastSeenAt = prior.lastSeenAt > row.dt ? prior.lastSeenAt : row.dt;
+      prior.occurrences += 1;
+      prior.redactionCount += sanitized.redactionCount;
+      prior.promptInjectionDetected ||= sanitized.promptInjectionDetected;
+    } else {
+      grouped.set(key, {
+        fingerprint: key,
+        severity: row.severity,
+        errorClass,
+        component: location,
+        summary: sanitized.value,
+        firstSeenAt: row.dt,
+        lastSeenAt: row.dt,
+        occurrences: 1,
+        redactionCount: sanitized.redactionCount,
+        promptInjectionDetected: sanitized.promptInjectionDetected,
+      });
+    }
+  }
+  const groups = [...grouped.values()].sort((a, b) =>
+    b.occurrences - a.occurrences || b.lastSeenAt.localeCompare(a.lastSeenAt) ||
+    a.fingerprint.localeCompare(b.fingerprint)
+  ).slice(0, MAX_DIAGNOSTIC_GROUPS);
+  return diagnosticSnapshotSchema.parse({
+    schemaVersion: "1.0",
+    generatedAt,
+    windowStartedAt: parsedArgs.windowStartedAt,
+    windowEndedAt: parsedArgs.windowEndedAt,
+    groups,
+    returnedRows: rows.length,
+    returnedBytes: new TextEncoder().encode(body).byteLength,
+    queryFingerprint: "bounded-error-diagnostics-v1",
+    truncated: rows.length === MAX_DIAGNOSTIC_ROWS ||
+      grouped.size > groups.length,
+    contentTrust: "untrusted-evidence",
+    minimization: {
+      rawLogRecordsPersisted: false,
+      requestContentPersisted: false,
+      urlsPersisted: false,
+      credentialsPersisted: false,
+      longIdentifiersPersisted: false,
+      deterministicRedactionApplied: true,
+    },
+    authority: {
+      mode: "read-only",
+      sideEffects: "none",
+      rawTelemetryRead: true,
+      rawTelemetryPersisted: false,
+      remediation: "prohibited",
+    },
+  });
+}
+
 /** Read-only Better Stack model definition exposed to swamp. */
 export const model = {
   type: "@mgreten/better-stack-read",
@@ -527,6 +827,13 @@ export const model = {
       schema: logAggregateSnapshotSchema,
       lifetime: "30d" as const,
       garbageCollection: 30,
+    },
+    diagnosticSnapshot: {
+      description:
+        "Deterministically redacted and grouped error diagnostics from a bounded fixed query",
+      schema: diagnosticSnapshotSchema,
+      lifetime: "7d" as const,
+      garbageCollection: 14,
     },
   },
   methods: {
@@ -567,6 +874,27 @@ export const model = {
         const handle = await context.writeResource(
           "logAggregateSnapshot",
           "logs-current",
+          snapshot,
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    collectDiagnosticSnapshot: {
+      description:
+        "Read selected error fields with a fixed query, redact sensitive values, and persist grouped untrusted evidence only.",
+      arguments: collectArgumentsSchema,
+      execute: async (
+        args: CollectArguments,
+        context: WriteContext,
+      ): Promise<{ dataHandles: unknown[] }> => {
+        const snapshot = await collectDiagnosticSnapshot(
+          context.globalArgs,
+          args,
+          fetch,
+        );
+        const handle = await context.writeResource(
+          "diagnosticSnapshot",
+          "diagnostics-current",
           snapshot,
         );
         return { dataHandles: [handle] };

@@ -1,10 +1,11 @@
 # @mgreten/better-stack-read
 
 A deliberately narrow, read-only connector for Better Stack Uptime, Telemetry,
-Errors, and Logs. It stores allowlisted operational fields and severity counts,
-not raw log records, arbitrary response text, URLs, request content, or
-credentials. Reads are bounded by time, pagination, response size, and output
-row limits. The extension exposes no mutation methods.
+Errors, and Logs. It stores allowlisted operational fields, severity counts,
+and optionally grouped error diagnostics after deterministic redaction. It
+never persists raw log records, URLs, request content, or credentials. Reads
+are bounded by time, pagination, response size, and output row limits. The
+extension exposes no mutation methods.
 
 ## Installation
 
@@ -55,8 +56,10 @@ vault-backed.
 ## Method: `collectOperationalSnapshot`
 
 Reads monitors, heartbeats, active/recent incidents, telemetry sources, and
-error applications. Only IDs, normalized status/platform/region tokens,
-selected timestamps, pause flags, and incident relationships are retained.
+error applications. It retains IDs, redacted bounded display names and incident
+causes, normalized status/platform/region tokens, selected timestamps, pause
+flags, and incident relationships. All upstream text is untrusted evidence and
+is deterministically scrubbed before persistence.
 
 | Argument | Type | Required | Limit |
 | --- | --- | --- | --- |
@@ -86,21 +89,44 @@ swamp model method run better-stack-read collectLogAggregateSnapshot \
   --input windowEndedAt=2026-08-18T12:00:00Z
 ```
 
+## Method: `collectDiagnosticSnapshot`
+
+Runs one fixed SQL query for error, fatal, critical, alert, and emergency log
+events. The query returns only timestamp, severity, message, exception class,
+controller, and action fields, with a hard limit of 200 rows. The extension
+then redacts common credentials, request-parameter payloads, email addresses,
+phone numbers, URLs, IP addresses, UUIDs, long identifiers, and prompt-like
+instructions before grouping repeated events by a SHA-256 fingerprint. It
+persists at most 25 groups for seven days.
+
+This method intentionally reads selected raw telemetry fields but never writes
+raw records. Its output is marked `untrusted-evidence` and grants no authority
+to acknowledge incidents or remediate systems.
+
+```sh
+swamp model method run better-stack-read collectDiagnosticSnapshot \
+  --input windowStartedAt=2026-08-18T06:00:00Z \
+  --input windowEndedAt=2026-08-18T12:00:00Z
+```
+
 ## Storage semantics
 
-Each method writes one stable resource name (`operational-current` or
-`logs-current`). Resource versions have a 30-day lifetime and garbage collection
-limit of 30. Operational responses are projected through strict schemas.
-Aggregate output contains severity/count pairs, byte and row counts, a fixed
-query fingerprint, truncation metadata, and explicit read-only authority flags.
-Credentials and full upstream responses are never written.
+Each method writes one stable resource name (`operational-current`,
+`logs-current`, or `diagnostics-current`). Operational and aggregate resources
+have a 30-day lifetime; diagnostics have a seven-day lifetime. Operational
+responses are projected through strict schemas. Aggregate output contains
+severity/count pairs, byte and row counts, a fixed query fingerprint,
+truncation metadata, and explicit read-only authority flags. Credentials and
+full upstream responses are never written.
 
 ## Limits and Query Boost warning
 
 Collection windows are limited to 24 hours. API reads use at most five pages,
 with bounded per-page sizes, ten-second request timeouts, and one-megabyte
-response limits. SQL returns at most 20 aggregate rows and one megabyte. A
-truncation flag signals pagination or row-bound exhaustion.
+response limits. Aggregate SQL returns at most 20 rows; diagnostic SQL reads at
+most 200 selected events and persists at most 25 grouped results. Every SQL
+response is limited to one megabyte. A truncation flag signals pagination, row,
+or group-bound exhaustion.
 
 The log method queries both recent and historical storage using Better Stack's
 `remote(...)` and `s3Cluster(...)` functions. **Better Stack Query Boost may
@@ -108,9 +134,12 @@ incur additional usage or cost when historical data is read.** Review your
 plan, retention layout, and Query Boost pricing before scheduling this method.
 The extension does not estimate or cap provider-side scanned bytes.
 
-The connector is not a raw-log export, live tail, alert mutator, incident
-acknowledger, or monitor manager. Better Stack API/schema changes may require a
-new extension release.
+Deterministic redaction reduces exposure but cannot prove that arbitrary text
+contains no sensitive data. Keep diagnostic retention short, treat every
+summary as untrusted, and avoid sending it to an external model without a
+separate policy decision. The connector is not a raw-log export, live tail,
+alert mutator, incident acknowledger, or monitor manager. Better Stack
+API/schema changes may require a new extension release.
 
 ## License
 
