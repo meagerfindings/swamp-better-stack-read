@@ -1,10 +1,12 @@
 import {
   collectArgumentsSchema,
+  collectDailySnapshot,
   collectDiagnosticSnapshot,
   collectLogAggregateSnapshot,
   collectOperationalSnapshot,
   globalArgumentsSchema,
   model,
+  rollingDailyWindow,
   sanitizeEvidenceText,
 } from "./better_stack_read.ts";
 
@@ -323,6 +325,90 @@ Deno.test("diagnostic collection groups useful fields and redacts unsafe content
   ) assert(!persisted.includes(forbidden), forbidden);
 });
 
+Deno.test("diagnostic fingerprints ignore Resend job duration and identifiers", async () => {
+  const fetcher = () =>
+    Promise.resolve(
+      new Response([
+        JSON.stringify({
+          dt: "2026-08-18T11:59:00Z",
+          severity: "error",
+          message:
+            "Error performing ActionMailer::MailDeliveryJob (Job ID: 550e8400-e29b-41d4-a716-446655440000) in 148.7ms: Resend::Error (Unable to deliver email)",
+          error_class: "Resend::Error",
+          controller: "",
+          action: "",
+        }),
+        JSON.stringify({
+          dt: "2026-08-18T11:54:00Z",
+          severity: "error",
+          message:
+            "Error performing ActionMailer::MailDeliveryJob (Job ID: 7d9b285d-67d7-4a25-8e91-31f490245381) in 932ms: Resend::Error (Unable to deliver email)",
+          error_class: "Resend::Error",
+          controller: "",
+          action: "",
+        }),
+      ].join("\n"), { status: 200 }),
+    );
+
+  const snapshot = await collectDiagnosticSnapshot(
+    config,
+    window,
+    fetcher,
+    generatedAt,
+  );
+
+  equal(snapshot.groups.length, 1);
+  equal(snapshot.groups[0].occurrences, 2);
+  equal(snapshot.groups[0].firstSeenAt, "2026-08-18T11:54:00Z");
+  equal(snapshot.groups[0].lastSeenAt, "2026-08-18T11:59:00Z");
+  assert(snapshot.groups[0].summary.includes("148.7ms"));
+  assert(snapshot.groups[0].summary.includes("<uuid>"));
+});
+
+Deno.test("rolling daily collection derives an exact bounded UTC window", () => {
+  equal(rollingDailyWindow("2026-08-18T19:43:49.000Z"), {
+    windowStartedAt: "2026-08-17T19:43:49.000Z",
+    windowEndedAt: "2026-08-18T19:43:49.000Z",
+  });
+});
+
+Deno.test("daily collection returns one shared validated window", async () => {
+  const requests: Array<{ url: URL; init?: RequestInit }> = [];
+  const fetchApi = apiFetcher(requests);
+  const snapshot = await collectDailySnapshot(
+    config,
+    (input, init) => {
+      const url = new URL(
+        input instanceof Request ? input.url : input.toString(),
+      );
+      if (url.hostname.endsWith(".betterstackdata.com")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          dt: "2026-08-18T11:59:00Z",
+          severity: "error",
+          message: "Synthetic bounded error",
+          error_class: "SyntheticError",
+          controller: "",
+          action: "",
+        }), { status: 200 }));
+      }
+      return fetchApi(input, init);
+    },
+    generatedAt,
+  );
+
+  equal(snapshot.windowStartedAt, "2026-08-17T12:01:00.000Z");
+  equal(snapshot.windowEndedAt, generatedAt);
+  equal(snapshot.operationalSnapshot.windowStartedAt, snapshot.windowStartedAt);
+  equal(snapshot.diagnosticSnapshot.windowStartedAt, snapshot.windowStartedAt);
+  equal(snapshot.operationalSnapshot.windowEndedAt, snapshot.windowEndedAt);
+  equal(snapshot.diagnosticSnapshot.windowEndedAt, snapshot.windowEndedAt);
+  equal(snapshot.authority, {
+    mode: "read-only",
+    sideEffects: "none",
+    remediation: "prohibited",
+  });
+});
+
 Deno.test("evidence sanitizer removes common sensitive values", () => {
   const result = sanitizeEvidenceText(
     "Bearer abcdefghijklmnop from 192.168.1.2 id 123456789 and 550e8400-e29b-41d4-a716-446655440000 phone +1 (555) 867-5309",
@@ -357,10 +443,20 @@ Deno.test("collection windows are deterministically bounded", () => {
 
 Deno.test("model exposes read methods and no mutation authority", () => {
   equal(Object.keys(model.methods), [
+    "collectDailySnapshot",
     "collectOperationalSnapshot",
     "collectLogAggregateSnapshot",
     "collectDiagnosticSnapshot",
   ]);
+  assert(model.methods.collectDailySnapshot.arguments.safeParse({}).success);
+  assert(
+    !model.methods.collectDailySnapshot.arguments.safeParse({
+      windowStartedAt: generatedAt,
+    }).success,
+  );
+  const dailySource = model.methods.collectDailySnapshot.execute.toString();
+  equal(dailySource.match(/writeResource\(/g)?.length, 1);
+  assert(dailySource.includes('"daily-current"'));
   equal(model.resources.operationalSnapshot.lifetime, "30d");
   equal(model.resources.operationalSnapshot.garbageCollection, 30);
   equal(model.resources.diagnosticSnapshot.lifetime, "7d");

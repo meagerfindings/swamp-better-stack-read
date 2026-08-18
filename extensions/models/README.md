@@ -53,6 +53,18 @@ supports scoped access.
 There are no defaults: every value is explicit and credentials should remain
 vault-backed.
 
+## Method: `collectDailySnapshot`
+
+Collects one rolling 24-hour operational snapshot and one bounded diagnostic
+snapshot in a single model invocation. It accepts no method arguments, making
+it suitable for scheduled workflows without stale static timestamps. Both
+outputs use the same generated time and collection window and are persisted
+atomically as `daily-current`.
+
+```sh
+swamp model method run better-stack-read collectDailySnapshot
+```
+
 ## Method: `collectOperationalSnapshot`
 
 Reads monitors, heartbeats, active/recent incidents, telemetry sources, and
@@ -111,13 +123,15 @@ swamp model method run better-stack-read collectDiagnosticSnapshot \
 
 ## Storage semantics
 
-Each method writes one stable resource name (`operational-current`,
-`logs-current`, or `diagnostics-current`). Operational and aggregate resources
-have a 30-day lifetime; diagnostics have a seven-day lifetime. Operational
-responses are projected through strict schemas. Aggregate output contains
-severity/count pairs, byte and row counts, a fixed query fingerprint,
-truncation metadata, and explicit read-only authority flags. Credentials and
-full upstream responses are never written.
+Each explicit-window method writes one stable resource name
+(`operational-current`, `logs-current`, or `diagnostics-current`). The daily
+method writes the combined `daily-current` resource for its shared window.
+Operational and aggregate resources have a 30-day lifetime; diagnostics and
+combined daily resources have a seven-day lifetime. Operational responses are
+projected through strict schemas. Aggregate output contains severity/count
+pairs, byte and row counts, a fixed query fingerprint, truncation metadata, and
+explicit read-only authority flags. Credentials and full upstream responses
+are never written.
 
 ## Limits and Query Boost warning
 

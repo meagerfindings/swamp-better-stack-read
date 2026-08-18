@@ -7,7 +7,7 @@
 import { z } from "npm:zod@4";
 
 /** Published CalVer for the Better Stack read model. */
-export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.3" as const;
+export const BETTER_STACK_READ_MODEL_VERSION = "2026.08.18.4" as const;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -69,6 +69,7 @@ export const collectArgumentsSchema = z.object({
     });
   }
 });
+const collectDailyArgumentsSchema = z.strictObject({});
 
 const Monitor = z.strictObject({
   id: Identifier,
@@ -191,6 +192,21 @@ export const diagnosticSnapshotSchema = z.strictObject({
   }),
 });
 
+/** One atomic rolling-window resource for scheduled deterministic workflows. */
+export const dailySnapshotSchema = z.strictObject({
+  schemaVersion: z.literal("1.0"),
+  generatedAt: Timestamp,
+  windowStartedAt: Timestamp,
+  windowEndedAt: Timestamp,
+  operationalSnapshot: operationalSnapshotSchema,
+  diagnosticSnapshot: diagnosticSnapshotSchema,
+  authority: z.strictObject({
+    mode: z.literal("read-only"),
+    sideEffects: z.literal("none"),
+    remediation: z.literal("prohibited"),
+  }),
+});
+
 type GlobalArguments = z.infer<typeof globalArgumentsSchema>;
 type CollectArguments = z.infer<typeof collectArgumentsSchema>;
 /** Output produced by {@link collectOperationalSnapshot}. */
@@ -199,6 +215,8 @@ export type OperationalSnapshot = z.infer<typeof operationalSnapshotSchema>;
 export type LogAggregateSnapshot = z.infer<typeof logAggregateSnapshotSchema>;
 /** Output produced by {@link collectDiagnosticSnapshot}. */
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
+/** Atomic output produced by {@link collectDailySnapshot}. */
+export type DailySnapshot = z.infer<typeof dailySnapshotSchema>;
 type Fetcher = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -285,6 +303,28 @@ export function sanitizeEvidenceText(
     redactionCount,
     promptInjectionDetected,
   };
+}
+
+function normalizeDiagnosticFingerprintText(value: string): string {
+  return value
+    .replace(
+      /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b/gi,
+      "<timestamp>",
+    )
+    .replace(
+      /\b(?:job[ _-]?id|jid)\s*[:=]\s*(?:<[^>]+>|[A-Za-z0-9_-]+)/gi,
+      "job-id=<identifier>",
+    )
+    .replace(
+      /\b\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s)\b/gi,
+      "<duration>",
+    )
+    .replace(/(\.[A-Za-z0-9_]+):\d+\b/g, "$1:<line>")
+    .replace(/\bline\s+\d+\b/gi, "line <line>")
+    .replace(
+      /<(?:uuid|long-identifier|numeric-identifier|redacted|filtered)>/gi,
+      "<identifier>",
+    );
 }
 
 function component(value: unknown): string | null {
@@ -749,7 +789,12 @@ export async function collectDiagnosticSnapshot(
       [component(row.controller), component(row.action)].filter(Boolean)
         .join("#") || null;
     const key = await fingerprint(
-      JSON.stringify([row.severity, errorClass, location, sanitized.value]),
+      JSON.stringify([
+        row.severity,
+        errorClass,
+        location,
+        normalizeDiagnosticFingerprintText(sanitized.value),
+      ]),
     );
     const prior = grouped.get(key);
     if (prior) {
@@ -809,6 +854,43 @@ export async function collectDiagnosticSnapshot(
   });
 }
 
+/** Builds one rolling 24-hour window for scheduled deterministic collection. */
+export function rollingDailyWindow(generatedAt = new Date().toISOString()) {
+  const endedAt = Timestamp.parse(generatedAt);
+  return collectArgumentsSchema.parse({
+    windowStartedAt: new Date(
+      Date.parse(endedAt) - MAX_WINDOW_SECONDS * 1_000,
+    ).toISOString(),
+    windowEndedAt: endedAt,
+  });
+}
+
+/** Collects one shared rolling window before any persistence occurs. */
+export async function collectDailySnapshot(
+  config: GlobalArguments,
+  fetcher: Fetcher,
+  generatedAt = new Date().toISOString(),
+): Promise<DailySnapshot> {
+  const window = rollingDailyWindow(generatedAt);
+  const [operationalSnapshot, diagnosticSnapshot] = await Promise.all([
+    collectOperationalSnapshot(config, window, fetcher, generatedAt),
+    collectDiagnosticSnapshot(config, window, fetcher, generatedAt),
+  ]);
+  return dailySnapshotSchema.parse({
+    schemaVersion: "1.0",
+    generatedAt,
+    windowStartedAt: window.windowStartedAt,
+    windowEndedAt: window.windowEndedAt,
+    operationalSnapshot,
+    diagnosticSnapshot,
+    authority: {
+      mode: "read-only",
+      sideEffects: "none",
+      remediation: "prohibited",
+    },
+  });
+}
+
 /** Read-only Better Stack model definition exposed to swamp. */
 export const model = {
   type: "@mgreten/better-stack-read",
@@ -835,8 +917,37 @@ export const model = {
       lifetime: "7d" as const,
       garbageCollection: 14,
     },
+    dailySnapshot: {
+      description:
+        "Atomic rolling 24-hour operational and redacted diagnostic snapshot",
+      schema: dailySnapshotSchema,
+      lifetime: "7d" as const,
+      garbageCollection: 14,
+    },
   },
   methods: {
+    collectDailySnapshot: {
+      description:
+        "Read one rolling 24-hour operational and diagnostic window for deterministic scheduled workflows.",
+      arguments: collectDailyArgumentsSchema,
+      execute: async (
+        _args: z.infer<typeof collectDailyArgumentsSchema>,
+        context: WriteContext,
+      ): Promise<{ dataHandles: unknown[] }> => {
+        const generatedAt = new Date().toISOString();
+        const snapshot = await collectDailySnapshot(
+          context.globalArgs,
+          fetch,
+          generatedAt,
+        );
+        const handle = await context.writeResource(
+          "dailySnapshot",
+          "daily-current",
+          snapshot,
+        );
+        return { dataHandles: [handle] };
+      },
+    },
     collectOperationalSnapshot: {
       description:
         "Read bounded Better Stack operational metadata without retaining arbitrary text, URLs, request content, or credentials.",
