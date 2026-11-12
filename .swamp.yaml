@@ -1,7 +1,7 @@
-swampVersion: 20261110.222200.0
+swampVersion: 20261111.012552.0
 initializedAt: "2026-08-18T17:43:06.633Z"
 repoId: 07ed0bc5-91f9-4afb-b08b-6b256d81a43f
 tools:
   - claude
 gitignoreManaged: true
-upgradedAt: "2026-11-11T22:42:35.723Z"
+upgradedAt: "2026-11-12T02:43:29.627Z"
